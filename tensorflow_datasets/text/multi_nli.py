@@ -59,15 +59,22 @@ class MultiNLIConfig(tfds.core.BuilderConfig):
   """BuilderConfig for MultiNLI."""
 
   @api_utils.disallow_positional_args
-  def __init__(self, text_encoder_config=None, **kwargs):
+  def __init__(self, validation_set, text_encoder_config=None, **kwargs):
     """BuilderConfig for MultiNLI.
 
     Args:
+      validation_set: `string`, either "matched" or "mismatched", says whether
+        to use the matched or mismatched validation sets.
       text_encoder_config: `tfds.features.text.TextEncoderConfig`, configuration
         for the `tfds.features.text.TextEncoder` used for the features feature.
       **kwargs: keyword arguments forwarded to super.
     """
     super(MultiNLIConfig, self).__init__(**kwargs)
+    if validation_set not in ["matched", "mismatched"]:
+      raise ValueError(
+          "Invalid validation set: '{}'. Must be either 'matched' or 'mismatched'."
+          .format(validation_set))
+    self.validation_set = validation_set
     self.text_encoder_config = (
         text_encoder_config or tfds.features.text.TextEncoderConfig())
 
@@ -77,8 +84,15 @@ class MultiNLI(tfds.core.GeneratorBasedBuilder):
 
   BUILDER_CONFIGS = [
       MultiNLIConfig(
-          name="plain_text",
-          version="0.0.1",
+          name="matched",
+          validation_set="matched",
+          version="0.0.2",
+          description="Plain text",
+      ),
+      MultiNLIConfig(
+          name="mismatched",
+          validation_set="mismatched",
+          version="0.0.2",
           description="Plain text",
       ),
   ]
@@ -95,8 +109,8 @@ class MultiNLI(tfds.core.GeneratorBasedBuilder):
                 tfds.features.Text(
                     encoder_config=self.builder_config.text_encoder_config),
             "label":
-                tfds.features.Text(
-                    encoder_config=self.builder_config.text_encoder_config),
+                tfds.features.ClassLabel(
+                    names=["entailment", "neutral", "contradiction"]),
         }),
         # No default supervised_keys (as we have to pass both premise
         # and hypothesis as input).
@@ -107,7 +121,7 @@ class MultiNLI(tfds.core.GeneratorBasedBuilder):
 
   def _vocab_text_gen(self, filepath):
     for ex in self._generate_examples(filepath):
-      yield " ".join([ex["premise"], ex["hypothesis"], ex["label"]])
+      yield " ".join([ex["premise"], ex["hypothesis"]])
 
   def _split_generators(self, dl_manager):
 
@@ -116,9 +130,11 @@ class MultiNLI(tfds.core.GeneratorBasedBuilder):
         "multinli_1.0.zip")
     mnli_path = os.path.join(downloaded_dir, "multinli_1.0")
     train_path = os.path.join(mnli_path, "multinli_1.0_train.txt")
-    # Using dev matched as the default for eval. Can also switch this to
-    # dev_mismatched.tsv
-    validation_path = os.path.join(mnli_path, "multinli_1.0_dev_matched.txt")
+    if self.builder_config.validation_set == "matched":
+      validation_file = "multinli_1.0_dev_matched.txt"
+    elif self.builder_config.validation_set == "mismatched":
+      validation_file = "multinli_1.0_dev_mismatched.txt"
+    validation_path = os.path.join(mnli_path, validation_file)
 
     # Generate shared vocabulary
     # maybe_build_from_corpus uses SubwordTextEncoder if that's configured
@@ -129,7 +145,6 @@ class MultiNLI(tfds.core.GeneratorBasedBuilder):
     # package data.
     self.info.features["premise"].maybe_set_encoder(encoder)
     self.info.features["hypothesis"].maybe_set_encoder(encoder)
-    self.info.features["label"].maybe_set_encoder(encoder)
 
     return [
         tfds.core.SplitGenerator(
@@ -147,13 +162,19 @@ class MultiNLI(tfds.core.GeneratorBasedBuilder):
 
     Args:
       filepath: a string
+
     Yields:
       dictionaries containing "premise", "hypothesis" and "label" strings
     """
     for idx, line in enumerate(tf.io.gfile.GFile(filepath, "rb")):
-      if idx == 0: continue  # skip header
+      if idx == 0:
+        continue  # skip header
       line = tf.compat.as_text(line.strip())
       split_line = line.split("\t")
+      # Examples not marked with a three out of five consensus are marked with
+      # "-" and should not be used in standard evaluations.
+      if split_line[0] == "-":
+        continue
       # Works for both splits even though dev has some extra human labels.
       yield {
           "premise": split_line[5],
